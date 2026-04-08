@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>LiveCaption</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard/dist/web/variable/pretendardvariable-dynamic-subset.min.css">
+<style>
+* { margin:0; padding:0; box-sizing:border-box; }
+html, body { height:100%; overflow:hidden; }
+body {
+  font-family: 'Pretendard Variable','Noto Sans KR',sans-serif;
+  user-select:none; -webkit-user-select:none;
+  display:flex; flex-direction:column;
+  transition: background .4s, color .4s;
+}
+body.dark { background:#000; color:#fff; }
+body.light { background:#F8F7F4; color:#1a1a1a; }
+
+.top { display:flex; align-items:center; justify-content:space-between; padding:16px 20px 8px; flex-shrink:0; }
+.dot { width:10px; height:10px; border-radius:50%; transition:all .3s; }
+body.dark .dot { background:rgba(255,255,255,.3); }
+body.light .dot { background:rgba(0,0,0,.25); }
+.dot.on { background:#4ADE80 !important; box-shadow:0 0 12px #4ADE80; animation:pulse 1.5s infinite; }
+.status { font-size:15px; font-weight:600; letter-spacing:1px; }
+body.dark .status { color:rgba(255,255,255,.4); }
+body.light .status { color:rgba(0,0,0,.35); }
+.theme-btn {
+  background:none; border:1px solid rgba(128,128,128,.2); border-radius:8px;
+  font-size:13px; padding:4px 12px; cursor:pointer;
+}
+body.dark .theme-btn { color:rgba(255,255,255,.4); }
+body.light .theme-btn { color:rgba(0,0,0,.35); }
+
+.caption-area { flex:1; display:flex; flex-direction:column; justify-content:center; align-items:center; padding:20px 24px; overflow:hidden; }
+.placeholder { font-size:20px; text-align:center; line-height:1.7; white-space:pre-line; }
+body.dark .placeholder { color:rgba(255,255,255,.4); }
+body.light .placeholder { color:rgba(0,0,0,.35); }
+.line { font-weight:700; line-height:1.4; margin:8px 0; word-break:keep-all; text-align:center; transition:opacity .3s; }
+.line.old { opacity:.4; }
+.interim { font-weight:500; line-height:1.4; margin:8px 0; opacity:.8; text-align:center; word-break:keep-all; color:#4ADE80; }
+body.light .interim { color:#16A34A; }
+
+.controls { flex-shrink:0; padding:12px 20px 28px; border-top:1px solid rgba(128,128,128,.12); }
+.sizes { display:flex; gap:6px; justify-content:center; margin-bottom:14px; }
+.size-btn {
+  padding:6px 14px; border-radius:20px; font-size:13px; font-weight:600;
+  border:none; cursor:pointer; transition:all .2s;
+}
+body.dark .size-btn { background:rgba(255,255,255,.08); color:rgba(255,255,255,.4); }
+body.light .size-btn { background:rgba(0,0,0,.08); color:rgba(0,0,0,.35); }
+body.dark .size-btn.active { background:#4ADE80; color:#000; }
+body.light .size-btn.active { background:#16A34A; color:#fff; }
+
+.main-btn {
+  width:100%; padding:18px 0; border-radius:16px; border:none;
+  font-size:20px; font-weight:700; cursor:pointer; transition:all .2s;
+}
+.main-btn.start { background:#4ADE80; color:#000; box-shadow:0 0 24px rgba(74,222,128,.25); }
+body.light .main-btn.start { background:#16A34A; color:#fff; box-shadow:0 0 24px rgba(22,163,74,.25); }
+.main-btn.stop { background:#EF4444; color:#fff; box-shadow:0 0 24px rgba(239,68,68,.4); }
+
+@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
+</style>
+</head>
+<body class="dark">
+
+<div class="top">
+  <div style="display:flex;align-items:center;gap:10px">
+    <div class="dot" id="dot"></div>
+    <span class="status" id="status">대기</span>
+  </div>
+  <button class="theme-btn" id="themeBtn" onclick="toggleTheme()">밝게</button>
+</div>
+
+<div class="caption-area" id="captionArea">
+  <div class="placeholder" id="placeholder">아래 버튼을 눌러
+자막을 시작하세요</div>
+</div>
+
+<div class="controls">
+  <div class="sizes" id="sizes"></div>
+  <button class="main-btn start" id="mainBtn" onclick="toggle()">자막 시작</button>
+</div>
+
+<script>
+const SIZES = [
+  { key:'small', label:'작게', px:28 },
+  { key:'medium', label:'기본', px:36 },
+  { key:'large', label:'크게', px:48 },
+  { key:'xlarge', label:'매우 크게', px:64 },
+];
+let currentSize = 'large';
+let currentTheme = 'dark';
+let listening = false;
+let rec = null;
+let lines = [];
+let shouldRestart = false;
+
+// Build size buttons
+const sizesEl = document.getElementById('sizes');
+SIZES.forEach(s => {
+  const btn = document.createElement('button');
+  btn.className = 'size-btn' + (s.key === currentSize ? ' active' : '');
+  btn.textContent = s.label;
+  btn.dataset.key = s.key;
+  btn.onclick = () => {
+    currentSize = s.key;
+    document.querySelectorAll('.size-btn').forEach(b => b.classList.toggle('active', b.dataset.key === s.key));
+    renderCaption();
+  };
+  sizesEl.appendChild(btn);
+});
+
+// STT setup
+const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+if (!SR) {
+  document.getElementById('captionArea').innerHTML = '<div class="placeholder">이 브라우저는 음성 인식을 지원하지 않습니다.<br>Chrome에서 열어주세요.</div>';
+  document.getElementById('mainBtn').style.display = 'none';
+} else {
+  rec = new SR();
+  rec.lang = 'ko-KR';
+  rec.continuous = true;
+  rec.interimResults = true;
+  rec.maxAlternatives = 1;
+
+  rec.onresult = (e) => {
+    let finalText = '';
+    let interimText = '';
+    for (let i = e.resultIndex; i < e.results.length; i++) {
+      if (e.results[i].isFinal) finalText += e.results[i][0].transcript;
+      else interimText += e.results[i][0].transcript;
+    }
+    if (finalText) {
+      lines.push(finalText.trim());
+      if (lines.length > 2) lines = lines.slice(-2);
+      renderCaption(interimText);
+    } else {
+      renderCaption(interimText);
+    }
+  };
+
+  rec.onerror = (e) => { if (e.error !== 'no-speech') console.error(e.error); };
+  rec.onend = () => { if (shouldRestart) try { rec.start(); } catch(e){} };
+}
+
+function renderCaption(interim) {
+  const area = document.getElementById('captionArea');
+  const px = SIZES.find(s => s.key === currentSize).px;
+  if (lines.length === 0 && !interim) {
+    area.innerHTML = `<div class="placeholder">${listening ? '말씀해 주세요...' : '아래 버튼을 눌러\n자막을 시작하세요'}</div>`;
+    return;
+  }
+  let html = '';
+  lines.forEach((t, i) => {
+    const cls = i === lines.length - 1 ? 'line' : 'line old';
+    html += `<div class="${cls}" style="font-size:${px}px">${t}</div>`;
+  });
+  if (interim) {
+    html += `<div class="interim" style="font-size:${px * 0.85}px">${interim}</div>`;
+  }
+  area.innerHTML = html;
+}
+
+function toggle() {
+  if (!rec) return;
+  const btn = document.getElementById('mainBtn');
+  const dot = document.getElementById('dot');
+  const st = document.getElementById('status');
+  if (listening) {
+    shouldRestart = false;
+    rec.abort();
+    listening = false;
+    btn.textContent = '자막 시작';
+    btn.className = 'main-btn start';
+    dot.classList.remove('on');
+    st.textContent = '대기';
+  } else {
+    shouldRestart = true;
+    lines = [];
+    try { rec.start(); } catch(e){}
+    listening = true;
+    btn.textContent = '자막 멈춤';
+    btn.className = 'main-btn stop';
+    dot.classList.add('on');
+    st.textContent = '듣는 중';
+    renderCaption('');
+  }
+}
+
+function toggleTheme() {
+  currentTheme = currentTheme === 'dark' ? 'light' : 'dark';
+  document.body.className = currentTheme;
+  document.getElementById('themeBtn').textContent = currentTheme === 'dark' ? '밝게' : '어둡게';
+}
+</script>
+</body>
+</html>
